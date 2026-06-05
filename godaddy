@@ -1,0 +1,216 @@
+#!/usr/bin/env bash
+# godaddy — thin CLI wrapper around the GoDaddy REST API.
+#
+# Auth: put your key + secret in ~/.godaddy/credentials as:
+#   GODADDY_KEY=xxxxxxxxxxxxxxx
+#   GODADDY_SECRET=xxxxxxxxxxxxxxx
+#   GODADDY_ENV=prod          # prod (api.godaddy.com) or ote (api.ote-godaddy.com)
+#
+# Note: GoDaddy gates most API endpoints to accounts with 50+ domains or
+# $1k+/yr spend. If you get 403 Forbidden, that's the account threshold,
+# not a CLI bug.
+#
+# Get keys: https://developer.godaddy.com/keys
+
+set -euo pipefail
+
+CRED_FILE="${HOME}/.godaddy/credentials"
+if [[ -f "$CRED_FILE" ]]; then
+  # shellcheck disable=SC1090
+  source "$CRED_FILE"
+fi
+GODADDY_ENV="${GODADDY_ENV:-prod}"
+if [[ "$GODADDY_ENV" == "ote" ]]; then
+  BASE="https://api.ote-godaddy.com"
+else
+  BASE="https://api.godaddy.com"
+fi
+
+require_auth() {
+  if [[ -z "${GODADDY_KEY:-}" || -z "${GODADDY_SECRET:-}" ]]; then
+    echo "error: GODADDY_KEY and GODADDY_SECRET not set." >&2
+    echo "Put them in $CRED_FILE (see comments at top of $(command -v godaddy))." >&2
+    echo "Get keys at https://developer.godaddy.com/keys" >&2
+    exit 2
+  fi
+}
+
+call() {
+  local method="$1" path="$2"; shift 2
+  curl -fsSL -X "$method" \
+    -H "Authorization: sso-key ${GODADDY_KEY}:${GODADDY_SECRET}" \
+    -H "Accept: application/json" \
+    -H "Content-Type: application/json" \
+    "$@" \
+    "${BASE}${path}"
+}
+
+cmd_help() {
+  cat <<'EOF'
+godaddy — GoDaddy API CLI
+
+Usage: godaddy <command> [args]
+
+Auth & config:
+  auth-check                Verify keys work (calls /v1/shoppers/subaccount or domains list)
+  whoami                    Show which env (prod/ote) + masked key
+
+Domains:
+  domains list                            List all domains on the account
+  domain get <domain>                     Show full record for a domain
+  domain renew <domain>                   Renew a domain (1 year)
+  domain availability <domain> [...]      Check availability for one or more domains
+
+DNS records:
+  dns list <domain> [type] [name]         List DNS records (type/name optional filters)
+  dns get <domain> <type> <name>          Get specific record(s)
+  dns set <domain> <type> <name> <value> [--ttl N]
+                                          Replace records of <type>/<name>
+  dns add <domain> <type> <name> <value> [--ttl N]
+                                          Append a new record (does NOT replace)
+  dns delete <domain> <type> <name>       Delete records of <type>/<name>
+
+Misc:
+  raw <METHOD> <path> [curl args...]      Direct call. Example:
+                                          godaddy raw GET /v1/domains?limit=5
+
+Examples:
+  godaddy domains list | jq '.[].domain'
+  godaddy dns list example.com A
+  godaddy dns set example.com A @ 1.2.3.4 --ttl 600
+  godaddy dns add example.com TXT _verify "abc123"
+
+Env: GODADDY_ENV=prod|ote  (default prod)
+Creds file: ~/.godaddy/credentials
+EOF
+}
+
+cmd_whoami() {
+  local masked="(unset)"
+  if [[ -n "${GODADDY_KEY:-}" ]]; then
+    masked="${GODADDY_KEY:0:6}...${GODADDY_KEY: -4}"
+  fi
+  echo "env:        ${GODADDY_ENV}"
+  echo "base:       ${BASE}"
+  echo "key:        ${masked}"
+  echo "creds file: ${CRED_FILE}"
+}
+
+cmd_auth_check() {
+  require_auth
+  local out
+  if out=$(call GET "/v1/domains?limit=1" 2>&1); then
+    echo "OK — API key is accepted on ${BASE}"
+    echo "Sample response: $out"
+  else
+    echo "FAIL — call returned non-2xx. Output:" >&2
+    echo "$out" >&2
+    echo >&2
+    echo "If you see 403 Forbidden, your account is below GoDaddy's gating threshold (50+ domains or \$1k+/yr)." >&2
+    exit 1
+  fi
+}
+
+cmd_domains() {
+  require_auth
+  case "${1:-}" in
+    list|"") call GET "/v1/domains" ;;
+    *) echo "unknown: domains $1" >&2; exit 2 ;;
+  esac
+}
+
+cmd_domain() {
+  require_auth
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    get)
+      local d="${1:?usage: domain get <domain>}"
+      call GET "/v1/domains/${d}"
+      ;;
+    renew)
+      local d="${1:?usage: domain renew <domain>}"
+      call POST "/v1/domains/${d}/renew" -d '{}'
+      ;;
+    availability)
+      [[ $# -gt 0 ]] || { echo "usage: domain availability <domain> [...]" >&2; exit 2; }
+      if [[ $# -eq 1 ]]; then
+        call GET "/v1/domains/available?domain=$1"
+      else
+        local body; body=$(printf '%s\n' "$@" | python3 -c 'import sys,json; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')
+        call POST "/v1/domains/available" --data "$body"
+      fi
+      ;;
+    *) echo "unknown: domain $sub" >&2; exit 2 ;;
+  esac
+}
+
+cmd_dns() {
+  require_auth
+  local sub="${1:-}"; shift || true
+  case "$sub" in
+    list)
+      local d="${1:?usage: dns list <domain> [type] [name]}"; shift
+      local p="/v1/domains/${d}/records"
+      [[ $# -ge 1 ]] && p="${p}/$1"
+      [[ $# -ge 2 ]] && p="${p}/$2"
+      call GET "$p"
+      ;;
+    get)
+      local d="${1:?usage: dns get <domain> <type> <name>}"
+      local t="${2:?usage: dns get <domain> <type> <name>}"
+      local n="${3:?usage: dns get <domain> <type> <name>}"
+      call GET "/v1/domains/${d}/records/${t}/${n}"
+      ;;
+    set|add)
+      local d="${1:?usage: dns $sub <domain> <type> <name> <value> [--ttl N]}"
+      local t="${2:?type required}"; local n="${3:?name required}"; local v="${4:?value required}"
+      shift 4
+      local ttl=3600
+      while [[ $# -gt 0 ]]; do
+        case "$1" in
+          --ttl) ttl="$2"; shift 2 ;;
+          *) echo "unknown flag: $1" >&2; exit 2 ;;
+        esac
+      done
+      local body
+      body=$(python3 -c "import json,sys; print(json.dumps([{'data': sys.argv[1], 'ttl': int(sys.argv[2])}]))" "$v" "$ttl")
+      if [[ "$sub" == "set" ]]; then
+        call PUT "/v1/domains/${d}/records/${t}/${n}" --data "$body"
+      else
+        # add = fetch existing, append, PUT back
+        local existing
+        existing=$(call GET "/v1/domains/${d}/records/${t}/${n}" 2>/dev/null || echo '[]')
+        local merged
+        merged=$(python3 -c "import json,sys; ex=json.loads(sys.argv[1] or '[]'); new=json.loads(sys.argv[2]); print(json.dumps(ex+new))" "$existing" "$body")
+        call PUT "/v1/domains/${d}/records/${t}/${n}" --data "$merged"
+      fi
+      echo "OK"
+      ;;
+    delete)
+      local d="${1:?usage: dns delete <domain> <type> <name>}"
+      local t="${2:?type required}"; local n="${3:?name required}"
+      call DELETE "/v1/domains/${d}/records/${t}/${n}"
+      echo "OK"
+      ;;
+    *) echo "unknown: dns $sub" >&2; exit 2 ;;
+  esac
+}
+
+cmd_raw() {
+  require_auth
+  local m="${1:?usage: raw <METHOD> <path> [curl args...]}"
+  local p="${2:?usage: raw <METHOD> <path> [curl args...]}"
+  shift 2
+  call "$m" "$p" "$@"
+}
+
+case "${1:-help}" in
+  -h|--help|help) cmd_help ;;
+  whoami)          cmd_whoami ;;
+  auth-check)      cmd_auth_check ;;
+  domains)         shift; cmd_domains "$@" ;;
+  domain)          shift; cmd_domain  "$@" ;;
+  dns)             shift; cmd_dns     "$@" ;;
+  raw)             shift; cmd_raw     "$@" ;;
+  *) echo "unknown command: $1" >&2; cmd_help >&2; exit 2 ;;
+esac
