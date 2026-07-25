@@ -64,11 +64,14 @@ Domains:
 DNS records:
   dns list <domain> [type] [name]         List DNS records (type/name optional filters)
   dns get <domain> <type> <name>          Get specific record(s)
-  dns set <domain> <type> <name> <value> [--ttl N]
+  dns set <domain> <type> <name> <value> [--ttl N] [--priority N] [--weight N] [--port N]
                                           Replace records of <type>/<name>
-  dns add <domain> <type> <name> <value> [--ttl N]
+  dns add <domain> <type> <name> <value> [--ttl N] [--priority N] [--weight N] [--port N]
                                           Append a new record (does NOT replace)
   dns delete <domain> <type> <name>       Delete records of <type>/<name>
+
+  MX/SRV records require a priority (defaults to 10 if --priority is omitted).
+  SRV records also take --weight and --port.
 
 Misc:
   raw <METHOD> <path> [curl args...]      Direct call. Example:
@@ -79,6 +82,8 @@ Examples:
   godaddy dns list example.com A
   godaddy dns set example.com A @ 1.2.3.4 --ttl 600
   godaddy dns add example.com TXT _verify "abc123"
+  godaddy dns add example.com MX @ mx1.forwardemail.net --priority 10
+  godaddy dns set example.com SRV _sip._tcp sip.example.com --priority 10 --weight 5 --port 5060
 
 Env: GODADDY_ENV=prod|ote  (default prod)
 Creds file: ~/.godaddy/credentials
@@ -162,18 +167,34 @@ cmd_dns() {
       call GET "/v1/domains/${d}/records/${t}/${n}"
       ;;
     set|add)
-      local d="${1:?usage: dns $sub <domain> <type> <name> <value> [--ttl N]}"
+      local d="${1:?usage: dns $sub <domain> <type> <name> <value> [--ttl N] [--priority N] [--weight N] [--port N]}"
       local t="${2:?type required}"; local n="${3:?name required}"; local v="${4:?value required}"
       shift 4
-      local ttl=3600
+      local ttl=3600 priority="" weight="" port=""
       while [[ $# -gt 0 ]]; do
         case "$1" in
-          --ttl) ttl="$2"; shift 2 ;;
+          --ttl)            ttl="$2"; shift 2 ;;
+          --priority|--pri) priority="$2"; shift 2 ;;
+          --weight)         weight="$2"; shift 2 ;;
+          --port)           port="$2"; shift 2 ;;
           *) echo "unknown flag: $1" >&2; exit 2 ;;
         esac
       done
+      # MX and SRV records require a priority; default to 10 when omitted.
+      if [[ ( "$t" == "MX" || "$t" == "SRV" ) && -z "$priority" ]]; then
+        priority=10
+      fi
       local body
-      body=$(python3 -c "import json,sys; print(json.dumps([{'data': sys.argv[1], 'ttl': int(sys.argv[2])}]))" "$v" "$ttl")
+      body=$(GD_TTL="$ttl" GD_PRIORITY="$priority" GD_WEIGHT="$weight" GD_PORT="$port" \
+        python3 -c '
+import json, os, sys
+rec = {"data": sys.argv[1], "ttl": int(os.environ["GD_TTL"])}
+for field, env in (("priority", "GD_PRIORITY"), ("weight", "GD_WEIGHT"), ("port", "GD_PORT")):
+    val = os.environ.get(env, "")
+    if val != "":
+        rec[field] = int(val)
+print(json.dumps([rec]))
+' "$v")
       if [[ "$sub" == "set" ]]; then
         call PUT "/v1/domains/${d}/records/${t}/${n}" --data "$body"
       else

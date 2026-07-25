@@ -82,8 +82,8 @@ godaddy domain availability <d> [...]   Check availability
 
 godaddy dns list <domain> [type] [name]                List records (filters optional)
 godaddy dns get <domain> <type> <name>                 Get specific record(s)
-godaddy dns set <domain> <type> <name> <value> [--ttl N]   Replace records
-godaddy dns add <domain> <type> <name> <value> [--ttl N]   Append a record
+godaddy dns set <domain> <type> <name> <value> [--ttl N] [--priority N] [--weight N] [--port N]   Replace records
+godaddy dns add <domain> <type> <name> <value> [--ttl N] [--priority N] [--weight N] [--port N]   Append a record
 godaddy dns delete <domain> <type> <name>              Delete records
 
 godaddy raw <METHOD> <path> [curl args...]             Direct API call
@@ -101,6 +101,13 @@ godaddy dns set example.com A @ 203.0.113.42 --ttl 600
 # Add a TXT record for domain verification (does NOT replace existing TXT)
 godaddy dns add example.com TXT _acme-challenge "abc123"
 
+# Set up inbound email (MX records need a priority; defaults to 10)
+godaddy dns set example.com MX @ mx1.forwardemail.net --priority 10
+godaddy dns add example.com MX @ mx2.forwardemail.net --priority 20
+
+# SRV record (priority + weight + port)
+godaddy dns set example.com SRV _sip._tcp sip.example.com --priority 10 --weight 5 --port 5060
+
 # Check 3 names at once
 godaddy domain availability foo.com bar.io baz.dev
 
@@ -114,6 +121,15 @@ godaddy raw GET '/v1/domains/suggest?query=cannabis&limit=5'
 - **`add`** — fetches existing records, appends the new one, then `PUT`s the merged list back. Use this when you want multiple records of the same type (e.g. several `TXT` records, MX fanout).
 
 GoDaddy's API has no native "append" endpoint; `dns add` simulates it.
+
+## Record types that need extra fields
+
+`MX` and `SRV` records carry more than just `data` + `ttl`:
+
+- **`MX`** — requires a **priority**. Pass `--priority N`; if omitted it defaults to `10`.
+- **`SRV`** — requires **priority**, **weight**, and **port**. Pass `--priority N --weight N --port N`.
+
+These fields are ignored for record types that don't use them, so plain `A`/`CNAME`/`TXT` calls are unchanged.
 
 ## Security
 
