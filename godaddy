@@ -14,6 +14,8 @@
 
 set -euo pipefail
 
+GODADDY_CLI_VERSION="0.2.0"
+
 CRED_FILE="${HOME}/.godaddy/credentials"
 if [[ -f "$CRED_FILE" ]]; then
   # shellcheck disable=SC1090
@@ -74,6 +76,7 @@ DNS records:
   SRV records also take --weight and --port.
 
 Misc:
+  version                                 Print CLI version
   raw <METHOD> <path> [curl args...]      Direct call. Example:
                                           godaddy raw GET /v1/domains?limit=5
 
@@ -227,6 +230,7 @@ cmd_raw() {
 
 case "${1:-help}" in
   -h|--help|help) cmd_help ;;
+  -V|--version|version) echo "godaddy ${GODADDY_CLI_VERSION}" ;;
   whoami)          cmd_whoami ;;
   auth-check)      cmd_auth_check ;;
   domains)         shift; cmd_domains "$@" ;;
